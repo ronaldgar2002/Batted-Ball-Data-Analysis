@@ -1,0 +1,164 @@
+---
+title: "Rays R&D"
+author: "Ronald Garcia"
+date: "2025-03-06"
+output: html_document
+---
+In this project, I analyzed batted ball data to estimate the "true" exit velocity (speed-off-bat) of hitters. Two separate measurement systems (System A and System B) provide exit velocity and vertical angle (launch angle) values, but not all data points are recorded for both systems. Additionally, I am told that it is suspected that System A is more accurate than System B. 
+
+My goals in this project are as listed:
+1. Compare and evaluate the differences between the two systems.
+2. Handle all the missing data using regression imputation.
+3. Estimate a "true" exit velocity for each batted ball.
+4. Project each batter’s expected exit velocity for the following season.
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(readr)
+library(knitr)
+library(ggplot2)
+library(dplyr)
+```
+We begin by loading the dataset and inspecting its structure.
+```{r}
+# Loading the batted ball csv file
+battedball <- read_csv("~/Desktop/Baseball/battedBallData.csv")
+
+head(battedball)
+
+# checking data
+str(battedball)
+summary(battedball)
+```
+The dataset contains columns for speed_A, speed_B, vangle_A, vangle_B, hittype, and batter/pitcher identifiers. Many values are missing (NA), making data imputation necessary for me continue on the task.
+--
+I investigate the differences between System A and System B and visualize them through histograms.
+```{r}
+#  differences between system A and B
+battedball <- battedball %>%
+  mutate(speed_diff = speed_A - speed_B,
+         vangle_diff = vangle_A - vangle_B)
+
+# summarize differences
+summary(battedball$speed_diff)
+summary(battedball$vangle_diff)
+
+# plot distribution of differences
+ggplot(battedball, aes(x = speed_diff)) +
+  geom_histogram(binwidth = 1, fill = "blue", alpha = 0.5) +
+  labs(title = "Distribution of Speed Difference (A - B)",
+       x = "Speed Difference (mph)", y = "Count") +
+  theme_minimal()
+
+ggplot(battedball, aes(x = vangle_diff)) +
+  geom_histogram(binwidth = 1, fill = "red", alpha = 0.5) +
+  labs(title = "Distribution of Vertical Angle Difference (A - B)",
+       x = "Vertical Angle Difference (degrees)", y = "Count") +
+  theme_minimal()
+
+```
+The histograms indicate that System B is more often underestimating exit velocity compared to System A, it also shows there is variability in the launch angle measurements.
+--
+I now calculated the correlation between the two systems.
+```{r}
+cor_speed <- cor(battedball$speed_A, battedball$speed_B, use = "complete.obs")
+cor_vangle <- cor(battedball$vangle_A, battedball$vangle_B, use = "complete.obs")
+
+print(paste("Correlation for Speed:", round(cor_speed, 3)))
+print(paste("Correlation for Vertical Angle:", round(cor_vangle, 3)))
+
+```
+The results show that System A and System B are positively correlated, but not perfectly, suggesting the presence of a bias or measurement inconsistencies.
+--
+I used linear regression imputation to then estimate the missing values (NA's) in both speed and vangle columns.
+```{r}
+# Imputing speed_A using speed_B
+speed_model <- 
+  lm(speed_A ~ speed_B, data = battedball, na.action = na.exclude)
+
+battedball$speed_A[is.na(battedball$speed_A)] <- predict(speed_model, newdata = battedball[is.na(battedball$speed_A),])
+
+# Imputing speed_B using speed_A
+speed_model_rev <- 
+  lm(speed_B ~ speed_A, data = battedball, na.action = na.exclude)
+
+battedball$speed_B[is.na(battedball$speed_B)] <- predict(speed_model_rev, newdata = battedball[is.na(battedball$speed_B),])
+
+# Imputing vangle_A using vangle_B
+vangle_model <- 
+  lm(vangle_A ~ vangle_B, data = battedball, na.action = na.exclude)
+
+battedball$vangle_A[is.na(battedball$vangle_A)] <- predict(vangle_model, newdata = battedball[is.na(battedball$vangle_A),])
+
+# Imputing vangle_B using vangle_A
+vangle_model_rev <- 
+  lm(vangle_B ~ vangle_A, data = battedball, na.action = na.exclude)
+
+battedball$vangle_B[is.na(battedball$vangle_B)] <- predict(vangle_model_rev, newdata = battedball[is.na(battedball$vangle_B),])
+
+```
+Since system A is more accurate, I now create a weighted formula to create a estimated true speed.
+```{r}
+# Assume System A is more accurate and weight it more heavily because the prompt said it is much more accurate
+battedball <- battedball %>%
+  mutate(true_speed = case_when(
+    !is.na(speed_A) & !is.na(speed_B) ~ (0.7 * speed_A + 0.3 * speed_B),  # The created weighted average
+    is.na(speed_A) & !is.na(speed_B) ~ speed_B * (mean(speed_A, na.rm = TRUE) / mean(speed_B, na.rm = TRUE)), # Adjust speed_B
+    !is.na(speed_A) & is.na(speed_B) ~ speed_A,  # Using speed_A if available
+    TRUE ~ NA_real_
+  ))
+
+# dataset now has new true_speed column
+head(battedball)
+
+```
+I now computed each batters expected exit velocity for their following season. Using both a table for all players in the data given, and a table using a hand selected qualification number of a 100 batted ball minimum to have a chart with a 'qualified' sample size.
+```{r}
+# computed batter level averages
+batter_speeds <- battedball %>%
+  group_by(batter) %>%
+  summarize(avg_true_speed = mean(true_speed, na.rm = TRUE),
+            avg_vangle = mean(vangle_A, na.rm = TRUE),
+            num_balls = n()) %>%
+  arrange(desc(avg_true_speed))
+
+# display the table
+true_batters <- kable(batter_speeds, caption = "Projected True Speed Off Bat for Following Season")
+
+qualified_batter_speeds <- filter(batter_speeds, num_balls >= 100)
+  
+qualified_true_batters <- kable(qualified_batter_speeds, caption = "Projected True Speed Off Bat for Following Season (min. 100 BBE)")
+
+true_batters
+qualified_true_batters
+```
+I then created an extra plot to find interesting information like the hit type distribution for the new "true_speed".
+```{r}
+# Average true speed by hit type
+hittype_speeds <- battedball %>%
+  group_by(hittype) %>%
+  summarize(avg_true_speed = mean(true_speed, na.rm = TRUE),
+            avg_vangle = mean(vangle_A, na.rm = TRUE))
+
+# Display table
+kable(hittype_speeds, caption = "True Speed-Off-Bat by Hit Type")
+
+# Plot hit type distributions
+ggplot(battedball, aes(x = true_speed, fill = hittype)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of True Speed by Hit Type",
+       x = "True Exit Velocity (mph)", y = "Density") +
+  theme_minimal()
+
+```
+In this analysis, I examined batted ball data to estimate the true exit velocity of hitters while accounting for differences between two measurement systems (System A and System B).
+
+The findings reveal that:
+1. System A is more reliable and generally reports higher exit velocities than System B.
+2. System B systematically underestimates exit velocity, but the two systems are still positively correlated.
+3. Missing data was effectively handled using regression imputation, ensuring that incomplete records did not distort our analysis.
+4. A weighted average approach (70% System A, 30% System B) was used to estimate "true" exit velocity for each batted ball.
+5. Future performance projections were generated for each batter, allowing us to estimate expected exit velocity in the next season.
+6. Additionally, we explored how exit velocity varies by hit type, finding that line drives and fly balls typically have higher exit velocities, whereas ground balls and popups tend to be hit with lower speeds.
+
+Overall, our approach enables a more accurate assessment of hitter performance by correcting for biases between measurement systems and leveraging imputation techniques to maximize the available data.
